@@ -21,6 +21,7 @@ import i18nRoutes from './i18n.routes';
 import paymentWebhookRoutes from './payment-webhook.routes';
 import currencyRoutes from './currency.routes';
 import anchorRoutes from './anchor.routes';
+import apiKeyRoutes from './api-key.routes';
 
 
 import { publicRateLimiter } from '../middleware/rate-limit.middleware';
@@ -82,6 +83,8 @@ router.use('/v1/i18n', i18nRoutes);
 // Multi-currency catalogue/conversion (#1263) and Stellar anchors (#1262).
 router.use('/v1/currencies', currencyRoutes);
 router.use('/v1/anchors', anchorRoutes);
+// Scoped API key management (Issue #1420).
+mountVersioned('/api-keys', apiKeyRoutes);
 
 // Payment provider webhooks — unversioned, signature-verified (see
 // middleware/webhook-signature.middleware.ts).

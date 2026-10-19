@@ -1105,3 +1105,212 @@ fn test_datakey_variants_storage_round_trip() {
         assert_eq!(got.get(0).unwrap().delegatee, user2);
     });
 }
+
+// ============================================================================
+// AUTHORIZED MINTER LIST & PER-PERIOD CAPS (Issue: Token Minter Caps)
+// ============================================================================
+
+/// Helper: advance the ledger timestamp by `secs` seconds.
+fn advance_time(env: &Env, secs: u64) {
+    env.ledger().set_timestamp(env.ledger().timestamp() + secs);
+}
+
+#[test]
+fn test_add_minter_and_mint_succeeds() {
+    let (env, admin, minter, user1) = create_test_env();
+    let contract_id = initialize_contract(&env, &admin);
+    let client = AxTokenClient::new(&env, &contract_id);
+
+    env.mock_all_auths();
+
+    // Add minter with no cap.
+    client.add_minter(&minter, &None);
+
+    // Minter can mint.
+    client.mint(&user1, &500i128);
+    assert_eq!(client.balance(&user1), 500);
+    assert_eq!(client.total_supply(), 500);
+}
+
+#[test]
+fn test_unlisted_address_cannot_mint() {
+    let (env, admin, stranger, user1) = create_test_env();
+    let contract_id = initialize_contract(&env, &admin);
+    let client = AxTokenClient::new(&env, &contract_id);
+
+    // Do NOT register `stranger` as a minter.
+    // Without mock_all_auths() the call must fail authorization.
+    // We use try_mint which returns a Result rather than panicking.
+    let result = client.try_mint(&user1, &100i128);
+    assert!(
+        result.is_err(),
+        "a non-minter, non-admin address must not be able to mint"
+    );
+}
+
+#[test]
+fn test_minter_with_cap_mint_up_to_threshold() {
+    let (env, admin, minter, user1) = create_test_env();
+    let contract_id = initialize_contract(&env, &admin);
+    let client = AxTokenClient::new(&env, &contract_id);
+
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000);
+
+    let cap = 1_000i128;
+    client.add_minter(&minter, &Some(cap));
+
+    // Mint exactly up to the cap.
+    client.mint(&user1, &500i128);
+    client.mint(&user1, &500i128); // total = 1000 == cap
+
+    assert_eq!(client.balance(&user1), 1_000);
+    assert_eq!(client.total_supply(), 1_000);
+}
+
+#[test]
+#[should_panic(expected = "minter period cap exceeded")]
+fn test_minter_over_cap_is_rejected() {
+    let (env, admin, minter, user1) = create_test_env();
+    let contract_id = initialize_contract(&env, &admin);
+    let client = AxTokenClient::new(&env, &contract_id);
+
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000);
+
+    let cap = 1_000i128;
+    client.add_minter(&minter, &Some(cap));
+
+    // Mint up to cap.
+    client.mint(&user1, &1_000i128);
+
+    // One more token — must revert.
+    client.mint(&user1, &1i128);
+}
+
+#[test]
+fn test_minter_cap_resets_after_period_rolls_over() {
+    let (env, admin, minter, user1) = create_test_env();
+    let contract_id = initialize_contract(&env, &admin);
+    let client = AxTokenClient::new(&env, &contract_id);
+
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000);
+
+    let cap = 500i128;
+    client.add_minter(&minter, &Some(cap));
+
+    // Exhaust cap in period 1.
+    client.mint(&user1, &500i128);
+
+    // Advance time past one full period window.
+    advance_time(&env, MINTER_PERIOD_SECONDS + 1);
+
+    // New period — cap should have reset.
+    client.mint(&user1, &500i128);
+    assert_eq!(client.balance(&user1), 1_000);
+}
+
+#[test]
+fn test_remove_minter_blocks_subsequent_mints() {
+    let (env, admin, minter, user1) = create_test_env();
+    let contract_id = initialize_contract(&env, &admin);
+    let client = AxTokenClient::new(&env, &contract_id);
+
+    env.mock_all_auths();
+
+    client.add_minter(&minter, &None);
+
+    // Minter works before removal.
+    client.mint(&user1, &100i128);
+    assert_eq!(client.balance(&user1), 100);
+
+    // Remove the minter.
+    client.remove_minter(&minter);
+    assert!(!client.is_authorized_minter(&minter));
+
+    // Subsequent mint by the removed address must fail.
+    let result = client.try_mint(&user1, &100i128);
+    assert!(
+        result.is_err(),
+        "removed minter must no longer be able to mint"
+    );
+}
+
+#[test]
+fn test_list_minters_reflects_add_and_remove() {
+    let (env, admin, minter1, minter2) = create_test_env();
+    let contract_id = initialize_contract(&env, &admin);
+    let client = AxTokenClient::new(&env, &contract_id);
+
+    env.mock_all_auths();
+
+    assert_eq!(client.list_minters().len(), 0);
+
+    client.add_minter(&minter1, &None);
+    client.add_minter(&minter2, &Some(1_000i128));
+    assert_eq!(client.list_minters().len(), 2);
+
+    client.remove_minter(&minter1);
+    assert_eq!(client.list_minters().len(), 1);
+    assert_eq!(client.list_minters().get(0).unwrap(), minter2);
+}
+
+#[test]
+fn test_admin_bypasses_period_cap() {
+    let (env, admin, _, user1) = create_test_env();
+    let contract_id = initialize_contract(&env, &admin);
+    let client = AxTokenClient::new(&env, &contract_id);
+
+    env.mock_all_auths();
+    env.ledger().set_timestamp(1_000);
+
+    // Register admin as minter with a tiny cap — the admin code path bypasses
+    // the cap check, so mint amounts well above the cap should succeed.
+    client.add_minter(&admin, &Some(10i128));
+
+    // Admin minting goes through require_admin_or_authorized_minter which
+    // returns early for admin, skipping the cap.  Mint a large amount.
+    client.mint(&user1, &100_000i128);
+    assert_eq!(client.balance(&user1), 100_000);
+}
+
+#[test]
+#[should_panic(expected = "minter not registered")]
+fn test_remove_unregistered_minter_panics() {
+    let (env, admin, stranger, _) = create_test_env();
+    let contract_id = initialize_contract(&env, &admin);
+    let client = AxTokenClient::new(&env, &contract_id);
+
+    env.mock_all_auths();
+    client.remove_minter(&stranger);
+}
+
+#[test]
+fn test_get_minter_returns_correct_record() {
+    let (env, admin, minter, _) = create_test_env();
+    let contract_id = initialize_contract(&env, &admin);
+    let client = AxTokenClient::new(&env, &contract_id);
+
+    env.mock_all_auths();
+    env.ledger().set_timestamp(500);
+
+    client.add_minter(&minter, &Some(2_000i128));
+
+    let record = client.get_minter(&minter).unwrap();
+    assert_eq!(record.minter, minter);
+    assert_eq!(record.period_cap, Some(2_000i128));
+    assert_eq!(record.period_minted, 0);
+    assert_eq!(record.period_start, 500);
+}
+
+#[test]
+#[should_panic(expected = "period_cap must be positive")]
+fn test_add_minter_with_non_positive_cap_panics() {
+    let (env, admin, minter, _) = create_test_env();
+    let contract_id = initialize_contract(&env, &admin);
+    let client = AxTokenClient::new(&env, &contract_id);
+
+    env.mock_all_auths();
+    client.add_minter(&minter, &Some(0i128));
+}

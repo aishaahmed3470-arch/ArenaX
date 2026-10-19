@@ -2,12 +2,23 @@
 name = "sponsored-tournament"
 version = "0.1.0"
 edition = "2021"
+authors = ["ArenaX Team <dev@arenax.gg>"]
 
 [lib]
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-soroban-sdk = "21.7.7"
+# Aligned with the workspace SDK version for compatibility.
+soroban-sdk = "23.5.2"
+# The composable-example crate provides the TournamentHookInterface client.
+composable-example = { path = "../composable-example" }
 
 [dev-dependencies]
-soroban-sdk = { version = "21.7.7", features = ["testutils"] }
+soroban-sdk = { version = "23.5.2", features = ["testutils"] }
+composable-example = { path = "../composable-example", features = ["testutils"] }
+
+[features]
+testutils = [
+    "soroban-sdk/testutils",
+    "composable-example/testutils",
+]
